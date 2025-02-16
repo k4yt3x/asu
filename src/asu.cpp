@@ -454,56 +454,56 @@ int main(int argc, char** argv) {
         std::string arch_line;
         for (const std::string& arch : keystone_arches) {
             if (arch_line.length() + arch.length() + 1 > 70) {
-                std::cout << arch_line << std::endl;
+                std::cout << " " << arch_line << std::endl;
                 arch_line = " " + arch;
             } else {
                 arch_line += " " + arch;
             }
         }
         if (!arch_line.empty()) {
-            std::cout << arch_line << std::endl;
+            std::cout << " " << arch_line << std::endl;
         }
 
         std::cout << "\nSupported modes (assembly):" << std::endl;
         std::string mode_line;
         for (const std::string& mode : keystone_modes) {
             if (mode_line.length() + mode.length() + 1 > 70) {
-                std::cout << mode_line << std::endl;
+                std::cout << " " << mode_line << std::endl;
                 mode_line = " " + mode;
             } else {
                 mode_line += " " + mode;
             }
         }
         if (!mode_line.empty()) {
-            std::cout << mode_line << std::endl;
+            std::cout << " " << mode_line << std::endl;
         }
 
         std::cout << "\nSupported architectures (disassembly):" << std::endl;
         arch_line.clear();
         for (const std::string& arch : capstone_arches) {
             if (arch_line.length() + arch.length() + 1 > 70) {
-                std::cout << arch_line << std::endl;
+                std::cout << " " << arch_line << std::endl;
                 arch_line = " " + arch;
             } else {
                 arch_line += " " + arch;
             }
         }
         if (!arch_line.empty()) {
-            std::cout << arch_line << std::endl;
+            std::cout << " " << arch_line << std::endl;
         }
 
         std::cout << "\nSupported modes: (disassembly):" << std::endl;
         mode_line.clear();
         for (const std::string& mode : capstone_modes) {
             if (mode_line.length() + mode.length() + 1 > 70) {
-                std::cout << mode_line << std::endl;
+                std::cout << " " << mode_line << std::endl;
                 mode_line = " " + mode;
             } else {
                 mode_line += " " + mode;
             }
         }
         if (!mode_line.empty()) {
-            std::cout << mode_line << std::endl;
+            std::cout << " " << mode_line << std::endl;
         }
 
         std::cout << "\nExample (assembly):" << std::endl;
