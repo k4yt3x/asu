@@ -1,7 +1,6 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
-#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -11,12 +10,12 @@
 #include <keystone/keystone.h>
 #include <argparse/argparse.hpp>
 
-// Architectures supported by Keystone (and mapped to Capstone)
-static const std::vector<std::string> valid_arch_list =
+// Architectures supported by Keystone
+static const std::vector<std::string> keystone_arches =
     {"arm", "arm64", "mips", "x86", "ppc", "sparc", "systemz", "hexagon", "evm"};
 
 // Modes supported by Keystone (and mapped to Capstone)
-static const std::vector<std::string> valid_mode_list = {
+static const std::vector<std::string> keystone_modes = {
     "big",
     "arm",
     "thumb",
@@ -35,6 +34,38 @@ static const std::vector<std::string> valid_mode_list = {
     "sparc32",
     "sparc64",
     "v9"
+};
+
+// Architectures supported by Capstone
+static const std::vector<std::string> capstone_arches = {
+    "arm",
+    "arm64",
+    "mips",
+    "x86",
+    "ppc",
+    "sparc",
+    "systemz",
+    "xcore",
+    "m68k",
+    "tms320c64x",
+    "m680x",
+    "evm",
+    "mos65xx",
+    "wasm",
+    "bpf",
+    "riscv",
+    "sh",
+    "tricore"
+};
+
+// Modes supported by Capstone
+static const std::vector<std::string> capstone_modes = {
+    "big",          "16",          "32",          "64",          "thumb",       "mips32",
+    "mips64",       "mips32r6",    "v9",          "mclass",      "v8",          "micro",
+    "mips3",        "mips2",       "qpx",         "spe",         "booke",       "ps",
+    "bpf_extended", "riscv32",     "riscv64",     "riscvc",      "sh2",         "sh2a",
+    "sh3",          "sh4",         "sh4a",        "shfpu",       "shdsp",       "tricore_110",
+    "tricore_120",  "tricore_130", "tricore_131", "tricore_160", "tricore_161", "tricore_162"
 };
 
 // Parse architecture string to Keystone architecture enum
@@ -115,73 +146,95 @@ static ks_mode parse_mode(const std::string& mode_str) {
     return mode_val;
 }
 
-// Convert Keystone architecture to Capstone architecture
-static std::optional<cs_arch> ks_to_cs_arch(ks_arch karch) {
-    static const std::unordered_map<ks_arch, cs_arch> k2c_arch_map = {
-        {KS_ARCH_X86, CS_ARCH_X86},
-        {KS_ARCH_ARM, CS_ARCH_ARM},
-        {KS_ARCH_ARM64, CS_ARCH_ARM64},
-        {KS_ARCH_MIPS, CS_ARCH_MIPS},
-        {KS_ARCH_PPC, CS_ARCH_PPC},
-        {KS_ARCH_SPARC, CS_ARCH_SPARC},
-        {KS_ARCH_SYSTEMZ, CS_ARCH_SYSZ},
-        // Hexagon does not exist in Capstone
-        // EVM does not exist in Capstone
+// Parse architecture string to Capstone architecture enum
+static cs_arch parse_capstone_arch(const std::string& arch_str) {
+    static const std::unordered_map<std::string, cs_arch> cs_arch_map = {
+        {"arm", CS_ARCH_ARM},
+        {"arm64", CS_ARCH_ARM64},
+        {"mips", CS_ARCH_MIPS},
+        {"x86", CS_ARCH_X86},
+        {"ppc", CS_ARCH_PPC},
+        {"sparc", CS_ARCH_SPARC},
+        {"systemz", CS_ARCH_SYSZ},
+        {"xcore", CS_ARCH_XCORE},
+        {"m68k", CS_ARCH_M68K},
+        {"tms320c64x", CS_ARCH_TMS320C64X},
+        {"m680x", CS_ARCH_M680X},
+        {"evm", CS_ARCH_EVM},
+        {"mos65xx", CS_ARCH_MOS65XX},
+        {"wasm", CS_ARCH_WASM},
+        {"bpf", CS_ARCH_BPF},
+        {"riscv", CS_ARCH_RISCV},
+        {"sh", CS_ARCH_SH},
+        {"tricore", CS_ARCH_TRICORE},
     };
 
-    auto it = k2c_arch_map.find(karch);
-    if (it != k2c_arch_map.end()) {
-        return it->second;
-    }
-    // Default to x86 if architecture not found
-    return CS_ARCH_X86;
+    auto it = cs_arch_map.find(arch_str);
+    return (it != cs_arch_map.end()) ? it->second : CS_ARCH_X86;
 }
 
-// Convert Keystone mode to Capstone mode
-static cs_mode ks_to_cs_mode(ks_arch arch, ks_mode kmode) {
-    // Default to Little Endian
-    cs_mode result = static_cast<cs_mode>(0);
+static cs_mode parse_capstone_mode(const std::string& mode_str) {
+    cs_mode mode_val = CS_MODE_LITTLE_ENDIAN;
 
-    // Endianness
-    if (kmode & KS_MODE_BIG_ENDIAN) {
-        result = static_cast<cs_mode>(result | CS_MODE_BIG_ENDIAN);
-    } else {
-        result = static_cast<cs_mode>(result | CS_MODE_LITTLE_ENDIAN);
+    if (mode_str.empty()) {
+        return mode_val;
     }
 
-    // For x86
-    if (arch == KS_ARCH_X86) {
-        if (kmode & KS_MODE_16) {
-            result = static_cast<cs_mode>(result | CS_MODE_16);
-        } else if (kmode & KS_MODE_32) {
-            result = static_cast<cs_mode>(result | CS_MODE_32);
-        } else if (kmode & KS_MODE_64) {
-            result = static_cast<cs_mode>(result | CS_MODE_64);
+    static const std::unordered_map<std::string, cs_mode> cs_mode_map = {
+        {"big", CS_MODE_BIG_ENDIAN},
+        {"16", CS_MODE_16},
+        {"32", CS_MODE_32},
+        {"64", CS_MODE_64},
+        {"thumb", CS_MODE_THUMB},
+        {"mips32", CS_MODE_MIPS32},
+        {"mips64", CS_MODE_MIPS64},
+        {"mips32r6", CS_MODE_MIPS32R6},
+        {"v9", CS_MODE_V9},
+        {"mclass", CS_MODE_MCLASS},
+        {"v8", CS_MODE_V8},
+        {"micro", CS_MODE_MICRO},
+        {"mips3", CS_MODE_MIPS3},
+        {"mips2", CS_MODE_MIPS2},
+        {"qpx", CS_MODE_QPX},
+        {"spe", CS_MODE_SPE},
+        {"booke", CS_MODE_BOOKE},
+        {"ps", CS_MODE_PS},
+        {"bpf_extended", CS_MODE_BPF_EXTENDED},
+        {"riscv32", CS_MODE_RISCV32},
+        {"riscv64", CS_MODE_RISCV64},
+        {"riscvc", CS_MODE_RISCVC},
+        {"sh2", CS_MODE_SH2},
+        {"sh2a", CS_MODE_SH2A},
+        {"sh3", CS_MODE_SH3},
+        {"sh4", CS_MODE_SH4},
+        {"sh4a", CS_MODE_SH4A},
+        {"shfpu", CS_MODE_SHFPU},
+        {"shdsp", CS_MODE_SHDSP},
+        {"tricore_110", CS_MODE_TRICORE_110},
+        {"tricore_120", CS_MODE_TRICORE_120},
+        {"tricore_130", CS_MODE_TRICORE_130},
+        {"tricore_131", CS_MODE_TRICORE_131},
+        {"tricore_160", CS_MODE_TRICORE_160},
+        {"tricore_161", CS_MODE_TRICORE_161},
+        {"tricore_162", CS_MODE_TRICORE_162}
+    };
+
+    std::stringstream ss(mode_str);
+    std::string token;
+    while (std::getline(ss, token, ',')) {
+        token.erase(0, token.find_first_not_of(" \t"));
+        token.erase(token.find_last_not_of(" \t") + 1);
+        if (token.empty()) {
+            continue;
+        }
+
+        auto it = cs_mode_map.find(token);
+        if (it != cs_mode_map.end()) {
+            mode_val = static_cast<cs_mode>(mode_val | it->second);
         }
     }
 
-    // For ARM / ARM64
-    if (arch == KS_ARCH_ARM || arch == KS_ARCH_ARM64) {
-        if (kmode & KS_MODE_THUMB) {
-            result = static_cast<cs_mode>(result | CS_MODE_THUMB);
-        }
-    }
-
-    // For MIPS
-    if (arch == KS_ARCH_MIPS) {
-        if (kmode & KS_MODE_MIPS32R6) {
-            result = static_cast<cs_mode>(result | CS_MODE_MIPS32R6);
-        }
-    }
-
-    // For SPARC
-    if (arch == KS_ARCH_SPARC) {
-        if (kmode & KS_MODE_V9) {
-            result = static_cast<cs_mode>(result | CS_MODE_V9);
-        }
-    }
-
-    return result;
+    return mode_val;
 }
 
 // Parse syntax string to Keystone syntax bitmask
@@ -222,7 +275,7 @@ static int parse_syntax(const std::string& syntax_str) {
     return syntax_val;
 }
 
-// Assemble and print the given instruction
+// Assemble the given instruction and print the encoded bytes
 static void
 assemble_and_print(ks_engine* ks_handle, const std::string& instr, bool no_spaces, bool one_line) {
     if (instr.empty()) {
@@ -262,33 +315,28 @@ static std::vector<uint8_t> parse_hex_bytes(const std::string& hex_str) {
     std::istringstream hex_stream(hex_str);
 
     while (hex_stream >> hex_token) {
-        // Skip optional "0x" or "h" prefixes
+        // Skip optional "0x" or "\x" prefixes
         size_t pos = 0;
-        if (hex_token.substr(0, 2) == "0x") {
-            pos = 2;
-        } else if (hex_token.substr(0, 2) == "\\x") {
+        if (hex_token.substr(0, 2) == "0x" || hex_token.substr(0, 2) == "\\x") {
             pos = 2;
         }
 
-        // Also skip any "h" suffix
+        // Also skip any trailing 'h'
         if (!hex_token.empty() && hex_token.back() == 'h') {
             hex_token.pop_back();
         }
 
         // Parse each pair of hex chars
         while (pos < hex_token.length()) {
-            // Need at least 2 chars
             if (pos + 1 >= hex_token.length()) {
                 std::cerr << "incomplete hex byte in '" << hex_token << "'" << std::endl;
                 break;
             }
 
-            // Convert hex chars to byte value
             std::string byte_str = hex_token.substr(pos, 2);
             char* end_ptr;
             uint8_t byte_val = static_cast<uint8_t>(std::strtol(byte_str.c_str(), &end_ptr, 16));
 
-            // Check if the conversion succeeded
             if (end_ptr != byte_str.c_str() + 2) {
                 std::cerr << "invalid hex byte '" << byte_str << "'" << std::endl;
                 break;
@@ -323,7 +371,7 @@ static void disassemble_and_print(csh cs_handle, const std::vector<uint8_t>& cod
     cs_free(insn, count);
 }
 
-// Process a line of instructions (disassembly)
+// Process the given hex bytes and disassemble them
 static void process_bytes(csh cs_handle, const std::string& hex_text, bool no_offset) {
     // We parse the entire line as one set of bytes
     std::vector<uint8_t> bytes = parse_hex_bytes(hex_text);
@@ -378,9 +426,7 @@ int main(int argc, char** argv) {
         .implicit_value(true);
 
     // Capture remaining arguments
-    program.add_argument("instructions")
-        .help("assembly instructions or hex bytes (depending on mode); multiple arguments OK")
-        .remaining();
+    program.add_argument("instructions").help("assembly instructions or hex bytes").remaining();
 
     // Parse
     try {
@@ -391,7 +437,6 @@ int main(int argc, char** argv) {
         std::exit(1);
     }
 
-    // Retrieve values
     bool help_flag = program.get<bool>("--help");
     bool version_flag = program.get<bool>("--version");
     bool disassemble_flag = program.get<bool>("--disassemble");
@@ -405,15 +450,61 @@ int main(int argc, char** argv) {
     if (help_flag) {
         std::cout << program;
 
-        std::cout << "\nSupported architectures:" << std::endl;
-        for (const std::string& arch : valid_arch_list) {
-            std::cout << " " << arch;
+        std::cout << "\nSupported architectures (assembly):" << std::endl;
+        std::string arch_line;
+        for (const std::string& arch : keystone_arches) {
+            if (arch_line.length() + arch.length() + 1 > 70) {
+                std::cout << arch_line << std::endl;
+                arch_line = " " + arch;
+            } else {
+                arch_line += " " + arch;
+            }
         }
-        std::cout << "\n\nSupported modes:" << std::endl;
-        for (const std::string& mode : valid_mode_list) {
-            std::cout << " " << mode;
+        if (!arch_line.empty()) {
+            std::cout << arch_line << std::endl;
         }
-        std::cout << std::endl;
+
+        std::cout << "\nSupported modes (assembly):" << std::endl;
+        std::string mode_line;
+        for (const std::string& mode : keystone_modes) {
+            if (mode_line.length() + mode.length() + 1 > 70) {
+                std::cout << mode_line << std::endl;
+                mode_line = " " + mode;
+            } else {
+                mode_line += " " + mode;
+            }
+        }
+        if (!mode_line.empty()) {
+            std::cout << mode_line << std::endl;
+        }
+
+        std::cout << "\nSupported architectures (disassembly):" << std::endl;
+        arch_line.clear();
+        for (const std::string& arch : capstone_arches) {
+            if (arch_line.length() + arch.length() + 1 > 70) {
+                std::cout << arch_line << std::endl;
+                arch_line = " " + arch;
+            } else {
+                arch_line += " " + arch;
+            }
+        }
+        if (!arch_line.empty()) {
+            std::cout << arch_line << std::endl;
+        }
+
+        std::cout << "\nSupported modes: (disassembly):" << std::endl;
+        mode_line.clear();
+        for (const std::string& mode : capstone_modes) {
+            if (mode_line.length() + mode.length() + 1 > 70) {
+                std::cout << mode_line << std::endl;
+                mode_line = " " + mode;
+            } else {
+                mode_line += " " + mode;
+            }
+        }
+        if (!mode_line.empty()) {
+            std::cout << mode_line << std::endl;
+        }
 
         std::cout << "\nExample (assembly):" << std::endl;
         std::cout << "  asu 'xor rax, rax' ret" << std::endl;
@@ -440,22 +531,15 @@ int main(int argc, char** argv) {
         leftover_args = program.get<std::vector<std::string>>("instructions");
     }
 
-    // Disassembly mode
+    // Disassembly mode with Capstone
     if (disassemble_flag) {
-        // Convert ks -> cs
-        ks_arch ks_arch_val = parse_arch(arch_str);
-        ks_mode ks_mode_val = parse_mode(mode_str);
-        std::optional<cs_arch> cs_arch_val = ks_to_cs_arch(ks_arch_val);
-        cs_mode cs_mode_val = ks_to_cs_mode(ks_arch_val, ks_mode_val);
-
-        if (!cs_arch_val.has_value()) {
-            std::cerr << "unsupported architecture: " << arch_str << std::endl;
-            return 1;
-        }
+        // Parse arch/mode for Capstone (no more converting from Keystone).
+        cs_arch cs_arch_val = parse_capstone_arch(arch_str);
+        cs_mode cs_mode_val = parse_capstone_mode(mode_str);
 
         // Open Capstone
         csh cs_handle;
-        cs_err cs_err_val = cs_open(cs_arch_val.value(), cs_mode_val, &cs_handle);
+        cs_err cs_err_val = cs_open(cs_arch_val, cs_mode_val, &cs_handle);
         if (cs_err_val != CS_ERR_OK) {
             std::cerr << "failed to initialize Capstone: " << cs_strerror(cs_err_val) << std::endl;
             return 1;
@@ -490,7 +574,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Assembly mode
+    // Assembly mode with Keystone
     ks_arch arch_val = parse_arch(arch_str);
     ks_mode mode_val = parse_mode(mode_str);
     int syntax_val = parse_syntax(syntax_str);
@@ -523,6 +607,7 @@ int main(int argc, char** argv) {
         for (const std::string& arg_str : leftover_args) {
             assemble_and_print(ks_handle, arg_str, no_spaces_flag, one_line_flag);
 
+            // If not the last one, and user wants spaces, put a space
             if (!no_spaces_flag && &arg_str != &leftover_args.back()) {
                 std::cout << " ";
             }
