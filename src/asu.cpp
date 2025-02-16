@@ -1,19 +1,21 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#include <capstone/capstone.h>
 #include <keystone/keystone.h>
 #include <argparse/argparse.hpp>
 
-// Architectures supported by Keystone
+// Architectures supported by Keystone (and mapped to Capstone)
 static const std::vector<std::string> valid_arch_list =
     {"arm", "arm64", "mips", "x86", "ppc", "sparc", "systemz", "hexagon", "evm"};
 
-// Modes supported by Keystone
+// Modes supported by Keystone (and mapped to Capstone)
 static const std::vector<std::string> valid_mode_list = {
     "big",
     "arm",
@@ -35,7 +37,7 @@ static const std::vector<std::string> valid_mode_list = {
     "v9"
 };
 
-// Parse architecture using a map from string to ks_arch
+// Parse architecture string to Keystone architecture enum
 static ks_arch parse_arch(const std::string& arch_str) {
     static const std::unordered_map<std::string, ks_arch> arch_map = {
         {"arm", KS_ARCH_ARM},
@@ -60,7 +62,7 @@ static ks_arch parse_arch(const std::string& arch_str) {
     return KS_ARCH_X86;
 }
 
-// Parse mode using a map from string to ks_mode
+// Parse mode string to Keystone mode bitmask
 static ks_mode parse_mode(const std::string& mode_str) {
     static const std::unordered_map<std::string, ks_mode> mode_map = {
         {"little", KS_MODE_LITTLE_ENDIAN},
@@ -81,7 +83,7 @@ static ks_mode parse_mode(const std::string& mode_str) {
         {"qpx", KS_MODE_QPX},
         {"sparc32", KS_MODE_SPARC32},
         {"sparc64", KS_MODE_SPARC64},
-        {"v9", KS_MODE_V9}
+        {"v9", KS_MODE_V9},
     };
 
     ks_mode mode_val = KS_MODE_LITTLE_ENDIAN;
@@ -113,7 +115,76 @@ static ks_mode parse_mode(const std::string& mode_str) {
     return mode_val;
 }
 
-// Parse syntax using a map from string to bit flags
+// Convert Keystone architecture to Capstone architecture
+static std::optional<cs_arch> ks_to_cs_arch(ks_arch karch) {
+    static const std::unordered_map<ks_arch, cs_arch> k2c_arch_map = {
+        {KS_ARCH_X86, CS_ARCH_X86},
+        {KS_ARCH_ARM, CS_ARCH_ARM},
+        {KS_ARCH_ARM64, CS_ARCH_ARM64},
+        {KS_ARCH_MIPS, CS_ARCH_MIPS},
+        {KS_ARCH_PPC, CS_ARCH_PPC},
+        {KS_ARCH_SPARC, CS_ARCH_SPARC},
+        {KS_ARCH_SYSTEMZ, CS_ARCH_SYSZ},
+        // Hexagon does not exist in Capstone
+        // EVM does not exist in Capstone
+    };
+
+    auto it = k2c_arch_map.find(karch);
+    if (it != k2c_arch_map.end()) {
+        return it->second;
+    }
+    // Default to x86 if architecture not found
+    return CS_ARCH_X86;
+}
+
+// Convert Keystone mode to Capstone mode
+static cs_mode ks_to_cs_mode(ks_arch arch, ks_mode kmode) {
+    // Default to Little Endian
+    cs_mode result = static_cast<cs_mode>(0);
+
+    // Endianness
+    if (kmode & KS_MODE_BIG_ENDIAN) {
+        result = static_cast<cs_mode>(result | CS_MODE_BIG_ENDIAN);
+    } else {
+        result = static_cast<cs_mode>(result | CS_MODE_LITTLE_ENDIAN);
+    }
+
+    // For x86
+    if (arch == KS_ARCH_X86) {
+        if (kmode & KS_MODE_16) {
+            result = static_cast<cs_mode>(result | CS_MODE_16);
+        } else if (kmode & KS_MODE_32) {
+            result = static_cast<cs_mode>(result | CS_MODE_32);
+        } else if (kmode & KS_MODE_64) {
+            result = static_cast<cs_mode>(result | CS_MODE_64);
+        }
+    }
+
+    // For ARM / ARM64
+    if (arch == KS_ARCH_ARM || arch == KS_ARCH_ARM64) {
+        if (kmode & KS_MODE_THUMB) {
+            result = static_cast<cs_mode>(result | CS_MODE_THUMB);
+        }
+    }
+
+    // For MIPS
+    if (arch == KS_ARCH_MIPS) {
+        if (kmode & KS_MODE_MIPS32R6) {
+            result = static_cast<cs_mode>(result | CS_MODE_MIPS32R6);
+        }
+    }
+
+    // For SPARC
+    if (arch == KS_ARCH_SPARC) {
+        if (kmode & KS_MODE_V9) {
+            result = static_cast<cs_mode>(result | CS_MODE_V9);
+        }
+    }
+
+    return result;
+}
+
+// Parse syntax string to Keystone syntax bitmask
 static int parse_syntax(const std::string& syntax_str) {
     static const std::unordered_map<std::string, int> syntax_map = {
         {"intel", KS_OPT_SYNTAX_INTEL},
@@ -148,11 +219,10 @@ static int parse_syntax(const std::string& syntax_str) {
             syntax_val |= it->second;
         }
     }
-
     return syntax_val;
 }
 
-// Assemble a single instruction and print out the resulting bytes
+// Assemble and print the given instruction
 static void
 assemble_and_print(ks_engine* ks_handle, const std::string& instr, bool no_spaces, bool one_line) {
     if (instr.empty()) {
@@ -185,32 +255,86 @@ assemble_and_print(ks_engine* ks_handle, const std::string& instr, bool no_space
     ks_free(encoded_bytes);
 }
 
-// Split a string by `;` and call assemble_and_print for each token
-static void process_instructions(
-    ks_engine* ks_handle,
-    const std::string& instr_text,
-    bool no_spaces,
-    bool one_line
-) {
-    std::stringstream instr_stream(instr_text);
-    std::string instr_token;
-    while (std::getline(instr_stream, instr_token, ';')) {
-        // Trim
-        while (!instr_token.empty() && isspace(static_cast<unsigned char>(instr_token.front()))) {
-            instr_token.erase(instr_token.begin());
+// Parse a string of hex bytes into a vector of bytes
+static std::vector<uint8_t> parse_hex_bytes(const std::string& hex_str) {
+    std::vector<uint8_t> bytes;
+    std::string hex_token;
+    std::istringstream hex_stream(hex_str);
+
+    while (hex_stream >> hex_token) {
+        // Skip optional "0x" or "h" prefixes
+        size_t pos = 0;
+        if (hex_token.substr(0, 2) == "0x") {
+            pos = 2;
+        } else if (hex_token.substr(0, 2) == "\\x") {
+            pos = 2;
         }
-        while (!instr_token.empty() && isspace(static_cast<unsigned char>(instr_token.back()))) {
-            instr_token.pop_back();
+
+        // Also skip any "h" suffix
+        if (!hex_token.empty() && hex_token.back() == 'h') {
+            hex_token.pop_back();
         }
-        if (!instr_token.empty()) {
-            assemble_and_print(ks_handle, instr_token, no_spaces, one_line);
+
+        // Parse each pair of hex chars
+        while (pos < hex_token.length()) {
+            // Need at least 2 chars
+            if (pos + 1 >= hex_token.length()) {
+                std::cerr << "incomplete hex byte in '" << hex_token << "'" << std::endl;
+                break;
+            }
+
+            // Convert hex chars to byte value
+            std::string byte_str = hex_token.substr(pos, 2);
+            char* end_ptr;
+            uint8_t byte_val = static_cast<uint8_t>(std::strtol(byte_str.c_str(), &end_ptr, 16));
+
+            // Check if the conversion succeeded
+            if (end_ptr != byte_str.c_str() + 2) {
+                std::cerr << "invalid hex byte '" << byte_str << "'" << std::endl;
+                break;
+            }
+
+            bytes.push_back(byte_val);
+            pos += 2;
         }
+    }
+
+    return bytes;
+}
+
+// Disassemble and print the given bytes
+static void disassemble_and_print(csh cs_handle, const std::vector<uint8_t>& code, bool no_offset) {
+    cs_insn* insn = nullptr;
+    // Start address at 0 for display
+    uint64_t address = 0;
+    size_t count = cs_disasm(cs_handle, code.data(), code.size(), address, 0, &insn);
+    if (count == 0) {
+        std::cerr << "failed to disassemble the given bytes" << std::endl;
+        return;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        if (!no_offset) {
+            std::cout << "0x" << std::hex << insn[i].address << ": ";
+        }
+        std::cout << insn[i].mnemonic << " " << insn[i].op_str << std::dec << std::endl;
+    }
+
+    cs_free(insn, count);
+}
+
+// Process a line of instructions (disassembly)
+static void process_bytes(csh cs_handle, const std::string& hex_text, bool no_offset) {
+    // We parse the entire line as one set of bytes
+    std::vector<uint8_t> bytes = parse_hex_bytes(hex_text);
+    if (!bytes.empty()) {
+        disassemble_and_print(cs_handle, bytes, no_offset);
     }
 }
 
 int main(int argc, char** argv) {
-    // Create the parser
-    argparse::ArgumentParser program("as2b", "0.1.0", argparse::default_arguments::none);
+    // Create the parser, rename program to "asu"
+    argparse::ArgumentParser program("asu", "0.1.0", argparse::default_arguments::none);
 
     program.add_argument("-h", "--help")
         .help("print this help message and exit")
@@ -219,6 +343,11 @@ int main(int argc, char** argv) {
 
     program.add_argument("-v", "--version")
         .help("print version information and exit")
+        .default_value(false)
+        .implicit_value(true);
+
+    program.add_argument("-d", "--disassemble")
+        .help("disassemble input bytes (default is assemble)")
         .default_value(false)
         .implicit_value(true);
 
@@ -233,22 +362,27 @@ int main(int argc, char** argv) {
     program.add_argument("-s", "--syntax")
         .help("select syntax (intel, att, nasm, masm, gas, radix16)");
 
-    program.add_argument("-n", "--no-spaces")
-        .help("do not add spaces between output bytes")
+    program.add_argument("-p", "--no-spaces")
+        .help("do not add spaces between output bytes (assembly)")
         .default_value(false)
         .implicit_value(true);
 
-    program.add_argument("-o", "--one-line")
-        .help("print output bytes in one line")
+    program.add_argument("-l", "--one-line")
+        .help("print output bytes in one line (assembly)")
         .default_value(false)
         .implicit_value(true);
 
-    // Capture remaining arguments as instructions
+    program.add_argument("-o", "--no-offset")
+        .help("do not print the offset of the instruction")
+        .default_value(false)
+        .implicit_value(true);
+
+    // Capture remaining arguments
     program.add_argument("instructions")
-        .help("assembly instructions (separated by ';' or multiple arguments)")
+        .help("assembly instructions or hex bytes (depending on mode); multiple arguments OK")
         .remaining();
 
-    // Parse the command line
+    // Parse
     try {
         program.parse_args(argc, argv);
     } catch (const std::runtime_error& err) {
@@ -257,16 +391,17 @@ int main(int argc, char** argv) {
         std::exit(1);
     }
 
-    // Retrieve values from the parser
+    // Retrieve values
     bool help_flag = program.get<bool>("--help");
     bool version_flag = program.get<bool>("--version");
+    bool disassemble_flag = program.get<bool>("--disassemble");
     std::string arch_str = program.get<std::string>("--arch");
     std::string mode_str = program.get<std::string>("--mode");
     std::string syntax_str;
     bool no_spaces_flag = program.get<bool>("--no-spaces");
     bool one_line_flag = program.get<bool>("--one-line");
+    bool no_offset_flag = program.get<bool>("--no-offset");
 
-    // If help is specified, print usage and exit
     if (help_flag) {
         std::cout << program;
 
@@ -274,22 +409,24 @@ int main(int argc, char** argv) {
         for (const std::string& arch : valid_arch_list) {
             std::cout << " " << arch;
         }
-
         std::cout << "\n\nSupported modes:" << std::endl;
         for (const std::string& mode : valid_mode_list) {
             std::cout << " " << mode;
         }
         std::cout << std::endl;
 
-        std::cout << "\nExample:" << std::endl;
-        std::cout << "  as2b 'xor rax, rax' ret" << std::endl;
-        std::cout << "  as2b -a arm64 -m little 'mov w0, #1; ret'" << std::endl;
+        std::cout << "\nExample (assembly):" << std::endl;
+        std::cout << "  asu 'xor rax, rax' ret" << std::endl;
+        std::cout << "  asu -a arm64 -m little -pl 'mov w0, #1; ret'" << std::endl;
+
+        std::cout << "\nExample (disassembly):" << std::endl;
+        std::cout << "  asu -d 4831c0c3" << std::endl;
+        std::cout << "  asu -a arm64 -m little -d 20008052c0035fd6" << std::endl;
         return 0;
     }
 
-    // If version is specified, print version and exit
     if (version_flag) {
-        std::cout << "as2b 0.1.0" << std::endl;
+        std::cout << "asu 0.1.0" << std::endl;
         return 0;
     }
 
@@ -297,16 +434,68 @@ int main(int argc, char** argv) {
         syntax_str = program.get<std::string>("--syntax");
     }
 
+    // Get instructions (which might be assembly or hex bytes)
     std::vector<std::string> leftover_args;
     if (program.present("instructions")) {
         leftover_args = program.get<std::vector<std::string>>("instructions");
     }
 
-    // Initialize Keystone
+    // Disassembly mode
+    if (disassemble_flag) {
+        // Convert ks -> cs
+        ks_arch ks_arch_val = parse_arch(arch_str);
+        ks_mode ks_mode_val = parse_mode(mode_str);
+        std::optional<cs_arch> cs_arch_val = ks_to_cs_arch(ks_arch_val);
+        cs_mode cs_mode_val = ks_to_cs_mode(ks_arch_val, ks_mode_val);
+
+        if (!cs_arch_val.has_value()) {
+            std::cerr << "unsupported architecture: " << arch_str << std::endl;
+            return 1;
+        }
+
+        // Open Capstone
+        csh cs_handle;
+        cs_err cs_err_val = cs_open(cs_arch_val.value(), cs_mode_val, &cs_handle);
+        if (cs_err_val != CS_ERR_OK) {
+            std::cerr << "failed to initialize Capstone: " << cs_strerror(cs_err_val) << std::endl;
+            return 1;
+        }
+
+        // If x86, apply syntax as needed
+        if (cs_arch_val == CS_ARCH_X86 && !syntax_str.empty()) {
+            if (syntax_str.find("att") != std::string::npos) {
+                cs_option(cs_handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_ATT);
+            } else {
+                cs_option(cs_handle, CS_OPT_SYNTAX, CS_OPT_SYNTAX_INTEL);
+            }
+        }
+
+        // Disassemble leftover_args as hex
+        if (!leftover_args.empty()) {
+            for (auto& arg_str : leftover_args) {
+                process_bytes(cs_handle, arg_str, no_offset_flag);
+            }
+        } else {
+            // Or read from stdin
+            std::string line_str;
+            while (true) {
+                if (!std::getline(std::cin, line_str)) {
+                    break;
+                }
+                process_bytes(cs_handle, line_str, no_offset_flag);
+            }
+        }
+
+        cs_close(&cs_handle);
+        return 0;
+    }
+
+    // Assembly mode
     ks_arch arch_val = parse_arch(arch_str);
     ks_mode mode_val = parse_mode(mode_str);
     int syntax_val = parse_syntax(syntax_str);
 
+    // Initialize Keystone
     ks_engine* ks_handle = nullptr;
     ks_err err_code = ks_open(arch_val, mode_val, &ks_handle);
     if (err_code != KS_ERR_OK) {
@@ -314,7 +503,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Set the desired syntax
+    // Set the desired syntax (if any)
     if (syntax_val != 0) {
         err_code = ks_option(ks_handle, KS_OPT_SYNTAX, syntax_val);
         if (err_code == KS_ERR_OPT_INVALID) {
@@ -329,11 +518,10 @@ int main(int argc, char** argv) {
         }
     }
 
-    // If the user provided leftover arguments, assemble them
-    // Otherwise, read instructions from stdin until EOF
+    // If leftover_args exist, assemble them
     if (!leftover_args.empty()) {
         for (const std::string& arg_str : leftover_args) {
-            process_instructions(ks_handle, arg_str, no_spaces_flag, one_line_flag);
+            assemble_and_print(ks_handle, arg_str, no_spaces_flag, one_line_flag);
 
             if (!no_spaces_flag && &arg_str != &leftover_args.back()) {
                 std::cout << " ";
@@ -343,13 +531,13 @@ int main(int argc, char** argv) {
             }
         }
     } else {
+        // Otherwise, read from stdin until EOF
         std::string line_str;
         while (true) {
-            // Read a line from stdin until EOF
             if (!std::getline(std::cin, line_str)) {
                 break;
             }
-            process_instructions(ks_handle, line_str, no_spaces_flag, one_line_flag);
+            assemble_and_print(ks_handle, line_str, no_spaces_flag, one_line_flag);
 
             if (!no_spaces_flag) {
                 std::cout << " ";
@@ -360,7 +548,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Print a newline at the end if the output is on one line
+    // Print a newline at the end if user wants all on one line
     if (one_line_flag) {
         std::cout << std::endl;
     }
