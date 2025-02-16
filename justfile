@@ -12,4 +12,4 @@ build:
 
 [unix]
 clean:
-    rm -rf {{bindir}}
+    rm -rf {{bindir}} .cache

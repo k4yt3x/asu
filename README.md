@@ -1,20 +1,13 @@
 # asu
 
-asu (Assembly Utility) is the missing command-line tool that converts assembly code to raw bytes and vice versa.
+> [!NOTE]
+> As I finished making this tool I realized [rasm2](https://book.rada.re/tools/rasm2/intro.html) from Radare2 can do the job. I will leave this repository here, but you might want to use the more mature and feature-rich `rasm2` instead.
+
+asu (Assembly Utility) is the a command-line tool that converts assembly code to raw bytes and vice versa.
 
 The assembly functionalities are provided by the [Keystone Engine](https://www.keystone-engine.org/) and the disassembly functionalities are provided by the [Capstone Engine](https://www.capstone-engine.org/).
 
 ![Image](https://github.com/user-attachments/assets/f4935d35-e625-4f27-b927-667657f565f5)
-
-## Installation
-
-You can download pre-built binaries on the [releases page](https://github.com/k4yt3x/asu/releases/latest).
-
-For Arch Linux users, you can install `asu` from the AUR:
-
-```bash
-yay -S asu
-```
 
 ## Building From Source
 
